@@ -1,46 +1,43 @@
 import streamlit as st
 from openai import OpenAI
-import chromadb
-from chromadb.utils import embedding_functions
 from PIL import Image
 import io
 import base64
 import json
-import time
 
 st.set_page_config(page_title="微信风格客服", page_icon="💬", layout="wide")
 
+# ========== 模型配置（两个模型共用同一个密钥和地址）==========
 client = OpenAI(
     api_key=st.secrets["DOUBAO_API_KEY"],
     base_url="https://ark.cn-beijing.volces.com/api/v3"
 )
 
-MODEL_NAME = "ep-20260705180241-s57gl"
+# 纯文字模型：负责对话、知识库、工具调用（换成你自己的DeepSeek-V4-flash接入点ID）
+TEXT_MODEL = "ep-20260705195949-pr84t"
+# 视觉模型：负责图片识别、写文案（你现有的模型，不用改）
+VISION_MODEL = "ep-20260705180241-s57gl"
 
-# ==================== 知识库初始化 ====================
-@st.cache_resource
-def get_embedding():
-    return embedding_functions.SentenceTransformerEmbeddingFunction(
-        model_name="shibing624/text2vec-base-chinese"
-    )
+# ==================== 店铺知识库（内置，不用向量库，避免启动超时）====================
+KB_DATA = [
+    "营业时间：10:00-23:00",
+    "预约电话：13812345678",
+    "3个包间，提前1天预订",
+    "人均120元",
+    "招牌菜：酸菜鱼、麻辣香锅、蒜蓉小龙虾",
+    "会员充值500送50，1000送150",
+    "每周二会员日8折",
+    "生日当天凭身份证送招牌菜一份"
+]
 
-@st.cache_resource
-def init_kb():
-    lines = [
-        "营业时间：10:00-23:00", "预约电话：13812345678",
-        "3个包间，提前1天预订", "人均120元", "招牌菜：酸菜鱼、麻辣香锅、蒜蓉小龙虾",
-        "会员充值500送50，1000送150", "每周二会员日8折", "生日当天凭身份证送招牌菜一份"
-    ]
-    ef = get_embedding()
-    cc = chromadb.Client()
-    try:
-        cc.delete_collection("wx_kb")
-    except:
-        pass
-    col = cc.create_collection(name="wx_kb", embedding_function=ef)
-    for i, l in enumerate(lines):
-        col.add(documents=[l], ids=[str(i)])
-    return col, lines
+def search_kb(query, top_k=2):
+    """简单关键词检索，小知识库足够用，启动零延迟"""
+    scores = []
+    for item in KB_DATA:
+        score = sum(1 for word in query if word in item)
+        scores.append((score, item))
+    scores.sort(reverse=True, key=lambda x: x[0])
+    return [item for score, item in scores[:top_k] if score > 0]
 
 # ==================== 订单系统 ====================
 orders_db = {
@@ -61,14 +58,41 @@ def refund_order(oid):
     return "退款失败"
 
 tools = [
-    {"type":"function","function":{"name":"query_order","description":"查订单","parameters":{"type":"object","properties":{"order_id":{"type":"string"}},"required":["order_id"]}}},
-    {"type":"function","function":{"name":"refund_order","description":"退款","parameters":{"type":"object","properties":{"order_id":{"type":"string"}},"required":["order_id"]}}}
+    {
+        "type": "function",
+        "function": {
+            "name": "query_order",
+            "description": "查询订单的物流状态，需要订单号",
+            "parameters": {
+                "type": "object",
+                "properties": {"order_id": {"type": "string", "description": "订单编号"}},
+                "required": ["order_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "refund_order",
+            "description": "给指定订单办理退款",
+            "parameters": {
+                "type": "object",
+                "properties": {"order_id": {"type": "string", "description": "要退款的订单号"}},
+                "required": ["order_id"]
+            }
+        }
+    }
 ]
 
 def exec_tool(name, args):
-    if name == "query_order": return query_order(args["order_id"])
-    if name == "refund_order": return refund_order(args["order_id"])
-    return "未知操作"
+    try:
+        if name == "query_order":
+            return query_order(args["order_id"])
+        if name == "refund_order":
+            return refund_order(args["order_id"])
+        return "未知操作"
+    except Exception as e:
+        return f"工具执行失败：{str(e)}"
 
 # ==================== 图片处理 ====================
 def encode_image(uploaded_file, max_size=1024):
@@ -81,87 +105,104 @@ def encode_image(uploaded_file, max_size=1024):
     img.convert("RGB").save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode('utf-8')
 
-# ==================== 核心函数 ====================
-def smart_reply(user_input, history, kb_collection, image_b64=None):
-    """智能回复：判断意图，调用对应功能"""
-    
-    # 第一步：检索知识库
-    results = kb_collection.query(query_texts=[user_input], n_results=2)
-    docs = results['documents'][0]
-    knowledge = "\n".join(docs)
-    
-    # 第二步：构建消息
-    system_prompt = f"""你是一个亲切的店铺微信客服。
-参考以下店铺知识回答顾客问题：
+def analyze_image(image_b64, prompt):
+    """调用视觉模型分析图片，返回纯文本结果"""
+    try:
+        response = client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
+                    ]
+                }
+            ],
+            temperature=0.7,
+            max_tokens=500
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"图片识别失败：{str(e)}"
+
+# ==================== 核心对话函数（纯文字模型 + 工具调用）====================
+def chat_with_agent(user_text, history):
+    # 检索知识库
+    kb_docs = search_kb(user_text)
+    knowledge = "\n".join(kb_docs) if kb_docs else "无相关店铺信息"
+
+    system_prompt = f"""你是亲切的店铺微信客服，说话像朋友聊天，多用"亲""呢""哦"，回答简洁30-50字。
+参考店铺知识回答：
 {knowledge}
 
 规则：
-1. 语气像朋友聊天，用"亲""呢""哦"等语气词
-2. 回答简洁，30-50字
-3. 如果顾客想查订单或退款，使用工具
-4. 如果顾客发图片，描述并给出建议"""
-    
+1. 用户问订单、退款，自动调用对应工具
+2. 不知道的信息如实告知，不要编造
+3. 语气友好接地气，符合实体店客服风格"""
+
     messages = [{"role": "system", "content": system_prompt}] + history
-    
-    # 如果有图片
-    if image_b64:
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": user_input or "请分析这张图片"},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
-            ]
-        })
-    else:
-        messages.append({"role": "user", "content": user_input})
-    
+    messages.append({"role": "user", "content": user_text})
+
     try:
+        # 第一次调用：判断是否调工具
         response = client.chat.completions.create(
-            model=MODEL_NAME,
+            model=TEXT_MODEL,
             messages=messages,
             tools=tools,
             tool_choice="auto",
             temperature=0.7,
             max_tokens=500
         )
-        
         msg = response.choices[0].message
-        
+
         if msg.tool_calls:
             tool_call = msg.tool_calls[0]
-            args = json.loads(tool_call.function.arguments)
+            # 解析参数，增加异常捕获
+            try:
+                args = json.loads(tool_call.function.arguments)
+            except:
+                args = {"order_id": ""}
+            
             result = exec_tool(tool_call.function.name, args)
             
+            # 追加工具上下文
             messages.append(msg)
-            messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
-            
-            final = client.chat.completions.create(
-                model=MODEL_NAME,
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": result
+            })
+
+            # 第二次调用：生成最终回复
+            final_resp = client.chat.completions.create(
+                model=TEXT_MODEL,
                 messages=messages,
                 temperature=0.7,
                 max_tokens=300
             )
-            return final.choices[0].message.content, {"tool": tool_call.function.name, "result": result}
+            
+            final_content = final_resp.choices[0].message.content
+            # 返回回复 + 完整对话历史 + 工具日志
+            return final_content, messages[1:], {"tool": tool_call.function.name, "result": result}
         
-        return msg.content, None
+        # 无工具调用，直接返回
+        return msg.content, messages[1:], None
     
     except Exception as e:
-        return f"❌ 抱歉，系统出了点问题：{str(e)}", None
+        return f"❌ 系统异常：{str(e)}", history, None
 
 # ==================== 初始化状态 ====================
-if "kb_collection" not in st.session_state:
-    st.session_state.kb_collection, st.session_state.kb_lines = init_kb()
-
-if "wx_messages" not in st.session_state:
-    st.session_state.wx_messages = [
+if "chat_history" not in st.session_state:
+    # 统一维护一份对话历史，纯文本格式，传给模型用
+    st.session_state.chat_history = []
+if "ui_messages" not in st.session_state:
+    # UI展示用的消息列表，带图片预览、工具日志
+    st.session_state.ui_messages = [
         {"role": "assistant", "content": "亲，你好呀！👋\n我是店小秘，有什么可以帮你的吗？\n\n你可以问我：\n• 营业时间、菜单价格\n• 订单到哪里了\n• 发张照片我帮你写文案"}
     ]
 
-if "wx_history" not in st.session_state:
-    st.session_state.wx_history = []
-
 # ==================== 微信风格UI ====================
-# 顶部仿微信标题栏
 st.markdown("""
 <div style="background-color:#07C160; padding:10px; border-radius:10px 10px 0 0; text-align:center;">
     <h3 style="color:white; margin:0;">💬 店铺客服</h3>
@@ -171,89 +212,112 @@ st.markdown("""
 
 # 聊天区域
 chat_container = st.container()
-
 with chat_container:
-    for msg in st.session_state.wx_messages:
+    for msg in st.session_state.ui_messages:
         if msg["role"] == "user":
-            # 用户消息：右侧绿色气泡
+            # 用户消息
+            content_html = msg["content"]
+            if msg.get("image"):
+                content_html = f'<img src="{msg["image"]}" style="max-width:200px; border-radius:8px;"/><br/>' + content_html
+            
             st.markdown(f"""
             <div style="display:flex; justify-content:flex-end; margin:8px 0;">
-                <div style="background-color:#95EC69; padding:10px 15px; border-radius:15px 5px 15px 15px; max-width:70%;">
-                    <small>{msg["content"]}</small>
+                <div style="background-color:#95EC69; padding:10px 15px; border-radius:15px 5px 15px 15px; max-width:70%; word-break:break-all;">
+                    <small>{content_html}</small>
                 </div>
-                <div style="width:35px; height:35px; background-color:#07C160; border-radius:50%; margin-left:8px; display:flex; align-items:center; justify-content:center; color:white; font-size:14px;">👤</div>
+                <div style="width:35px; height:35px; background-color:#07C160; border-radius:50%; margin-left:8px; display:flex; align-items:center; justify-content:center; color:white; font-size:14px; flex-shrink:0;">👤</div>
             </div>
             """, unsafe_allow_html=True)
         else:
-            # AI消息：左侧白色气泡
+            # AI消息
             content_display = msg["content"]
             if msg.get("tool_log"):
-                content_display += f"\n\n🔧 [{msg['tool_log']['tool']}]"
+                content_display += f"\n\n🔧 已执行：{msg['tool_log']['tool']}"
             
             st.markdown(f"""
             <div style="display:flex; justify-content:flex-start; margin:8px 0;">
-                <div style="width:35px; height:35px; background-color:#07C160; border-radius:50%; margin-right:8px; display:flex; align-items:center; justify-content:center; color:white; font-size:14px;">🤖</div>
-                <div style="background-color:white; padding:10px 15px; border-radius:5px 15px 15px 15px; max-width:70%; border:1px solid #E0E0E0;">
+                <div style="width:35px; height:35px; background-color:#07C160; border-radius:50%; margin-right:8px; display:flex; align-items:center; justify-content:center; color:white; font-size:14px; flex-shrink:0;">🤖</div>
+                <div style="background-color:white; padding:10px 15px; border-radius:5px 15px 15px 15px; max-width:70%; border:1px solid #E0E0E0; word-break:break-all; white-space:pre-wrap;">
                     <small>{content_display}</small>
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
-# 底部输入栏
+# 底部操作栏
 st.divider()
-col1, col2, col3 = st.columns([5, 1, 1])
+col_img, col_input, col_clear = st.columns([1, 6, 1])
 
-with col1:
-    user_input = st.chat_input("输入消息...", key="wx_input")
-
-with col2:
+with col_img:
     upload_img = st.file_uploader("📷", type=["jpg","jpeg","png"], label_visibility="collapsed")
 
-with col3:
+with col_input:
+    user_input = st.chat_input("输入消息...", key="wx_input")
+
+with col_clear:
     if st.button("🔄", help="清空对话"):
-        st.session_state.wx_messages = [
+        st.session_state.chat_history = []
+        st.session_state.ui_messages = [
             {"role": "assistant", "content": "亲，你好呀！👋\n我是店小秘，有什么可以帮你的吗？"}
         ]
-        st.session_state.wx_history = []
         st.rerun()
 
 # ==================== 处理输入 ====================
+# 处理文字消息
 if user_input:
-    # 添加用户消息
-    st.session_state.wx_messages.append({"role": "user", "content": user_input})
+    # 更新UI消息
+    st.session_state.ui_messages.append({"role": "user", "content": user_input})
     
-    # 获取AI回复
     with st.spinner(""):
-        reply, tool_log = smart_reply(
+        reply, new_history, tool_log = chat_with_agent(
             user_input,
-            st.session_state.wx_history,
-            st.session_state.kb_collection
+            st.session_state.chat_history
         )
     
-    msg_data = {"role": "assistant", "content": reply}
-    if tool_log:
-        msg_data["tool_log"] = tool_log
+    # 更新对话历史
+    st.session_state.chat_history = new_history
+    st.session_state.chat_history.append({"role": "user", "content": user_input})
+    st.session_state.chat_history.append({"role": "assistant", "content": reply})
     
-    st.session_state.wx_messages.append(msg_data)
-    st.session_state.wx_history.append({"role": "user", "content": user_input})
-    st.session_state.wx_history.append({"role": "assistant", "content": reply})
+    # 更新UI
+    ai_msg = {"role": "assistant", "content": reply}
+    if tool_log:
+        ai_msg["tool_log"] = tool_log
+    st.session_state.ui_messages.append(ai_msg)
     st.rerun()
 
+# 处理图片消息
 if upload_img:
     img_b64 = encode_image(upload_img)
-    st.session_state.wx_messages.append({"role": "user", "content": "[图片]"})
+    img_data_url = f"data:image/jpeg;base64,{img_b64}"
     
-    with st.spinner(""):
-        reply, tool_log = smart_reply(
-            "请分析这张图片，如果是菜品就生成朋友圈文案",
-            st.session_state.wx_history,
-            st.session_state.kb_collection,
-            img_b64
+    # UI追加带预览的用户消息
+    st.session_state.ui_messages.append({
+        "role": "user",
+        "content": "帮我看看这张图，写个朋友圈文案",
+        "image": img_data_url
+    })
+    
+    with st.spinner("正在识别图片..."):
+        # 第一步：视觉模型分析图片
+        image_result = analyze_image(
+            img_b64,
+            "识别这道菜品，描述菜品特点，然后写一条适合实体店发的朋友圈文案，40-80字，带emoji"
+        )
+        
+        # 第二步：把识别结果传给文字Agent，融入对话上下文
+        reply, new_history, tool_log = chat_with_agent(
+            f"用户发了一张菜品图片，识别结果如下：\n{image_result}\n请整理成友好的客服回复",
+            st.session_state.chat_history
         )
     
-    msg_data = {"role": "assistant", "content": reply}
-    if tool_log:
-        msg_data["tool_log"] = tool_log
+    # 更新历史
+    st.session_state.chat_history = new_history
+    st.session_state.chat_history.append({"role": "user", "content": f"[图片] {image_result}"})
+    st.session_state.chat_history.append({"role": "assistant", "content": reply})
     
-    st.session_state.wx_messages.append(msg_data)
+    # 更新UI
+    ai_msg = {"role": "assistant", "content": reply}
+    if tool_log:
+        ai_msg["tool_log"] = tool_log
+    st.session_state.ui_messages.append(ai_msg)
     st.rerun()
