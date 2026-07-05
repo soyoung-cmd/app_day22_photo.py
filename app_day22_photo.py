@@ -6,7 +6,7 @@ st.set_page_config(page_title="拍照写文案", page_icon="📸", layout="wide"
 
 client = OpenAI(
     api_key=st.secrets["DEEPSEEK_API_KEY"],
-    base_url="https://api.deepseek.com/vl2"
+    base_url="https://api.deepseek.com/v1"
 )
 
 def encode_image(uploaded_file):
