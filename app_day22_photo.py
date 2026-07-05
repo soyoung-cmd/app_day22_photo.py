@@ -1,25 +1,24 @@
 import streamlit as st
+from openai import OpenAI
 import base64
-import requests
 from PIL import Image
 import io
 
 # ========== 页面配置 ==========
 st.set_page_config(page_title="拍照写文案", page_icon="📸", layout="wide")
 
-# ========== 读取密钥 ==========
-if "DOUBAO_API_KEY" not in st.secrets:
-    st.error("⚠️ 请在后台配置 DOUBAO_API_KEY")
-    st.stop()
+# ========== 初始化客户端（完全匹配官方示例格式）==========
+client = OpenAI(
+    api_key=st.secrets["DOUBAO_API_KEY"],  # 和你后台密钥名保持一致
+    base_url="https://ark.cn-beijing.volces.com/api/v3"  # 官方标准地址
+)
 
-API_KEY = st.secrets["DOUBAO_API_KEY"]
-# 豆包官方接口地址，标准OpenAI兼容格式
-API_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
-# 多模态模型名
-MODEL_NAME = "doubao-vision-pro-32k"
+# 接入点ID，换成你自己的ep开头的字符串
+MODEL_NAME = "ep-20260705180241-s57gl"
 
-# ========== 图片自动压缩 ==========
+# ========== 图片自动压缩（解决大图报错，必加）==========
 def encode_image(uploaded_file, max_size=1024):
+    """压缩图片+转base64，统一转JPG格式"""
     img = Image.open(uploaded_file)
     w, h = img.size
     if max(w, h) > max_size:
@@ -30,7 +29,7 @@ def encode_image(uploaded_file, max_size=1024):
     img.convert("RGB").save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode('utf-8')
 
-# ========== 调用多模态模型 ==========
+# ========== 核心功能：识图+写文案（标准OpenAI多模态格式）==========
 def photo_to_post(image_base64, style, shop_name):
     prompt = f"""你是餐饮营销专家。
 看到菜品照片后，请完成：
@@ -44,10 +43,10 @@ def photo_to_post(image_base64, style, shop_name):
 （文案内容）"""
 
     try:
-        # 标准 OpenAI 多模态格式，通用写法
-        payload = {
-            "model": MODEL_NAME,
-            "messages": [
+        # 完全和官方示例格式一致：content数组 + image_url对象
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
                 {
                     "role": "user",
                     "content": [
@@ -56,24 +55,13 @@ def photo_to_post(image_base64, style, shop_name):
                     ]
                 }
             ],
-            "temperature": 0.7,
-            "max_tokens": 500
-        }
-
-        headers = {
-            "Authorization": f"Bearer {API_KEY}",
-            "Content-Type": "application/json"
-        }
-
-        response = requests.post(API_URL, json=payload, headers=headers, timeout=30)
-        response.raise_for_status()
-        result = response.json()
-        
-        return result["choices"][0]["message"]["content"]
+            temperature=0.7,
+            max_tokens=500
+        )
+        return response.choices[0].message.content
     
     except Exception as e:
-        detail = response.text if 'response' in dir() else "无响应详情"
-        return f"❌ 生成失败\n错误原因：{str(e)}\n响应详情：{detail}"
+        return f"❌ 生成失败\n错误原因：{str(e)}"
 
 # ========== 结果解析 ==========
 def parse_result(raw):
