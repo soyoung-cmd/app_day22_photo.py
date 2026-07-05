@@ -1,12 +1,8 @@
 import streamlit as st
 from openai import OpenAI
-import chromadb
-from chromadb.utils import embedding_functions
-import base64
-from PIL import Image
-import io
+import json
 
-st.set_page_config(page_title="全能助手", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="智能操作助手", page_icon="🔧", layout="wide")
 
 client = OpenAI(
     api_key=st.secrets["DOUBAO_API_KEY"],
@@ -15,147 +11,171 @@ client = OpenAI(
 
 MODEL_NAME = "ep-20260705180241-s57gl"
 
-@st.cache_resource
-def get_embedding():
-    return embedding_functions.SentenceTransformerEmbeddingFunction(
-        model_name="shibing624/text2vec-base-chinese"
-    )
+orders_db = {
+    "001": {"customer": "张三", "item": "酸菜鱼", "status": "配送中", "phone": "13900001111"},
+    "002": {"customer": "李四", "item": "麻辣香锅", "status": "已签收", "phone": "13900002222"},
+    "003": {"customer": "王五", "item": "蒜蓉小龙虾", "status": "待发货", "phone": "13900003333"},
+}
 
-def init_knowledge(file_content=None):
-    if file_content:
-        lines = [l.strip() for l in file_content.split("\n") if l.strip()]
-    else:
-        lines = [
-            "老成都火锅店营业时间：10:00-23:00",
-            "预约电话：13812345678",
-            "有3个包间，需提前1天预订",
-            "人均消费：120元",
-            "招牌菜：酸菜鱼、麻辣香锅、蒜蓉小龙虾"
-        ]
-    
-    ef = get_embedding()
-    chroma_client = chromadb.Client()
-    
-    try:
-        chroma_client.delete_collection("shop_kb")
-    except:
-        pass
-    
-    collection = chroma_client.create_collection(name="shop_kb", embedding_function=ef)
-    for i, line in enumerate(lines):
-        collection.add(documents=[line], ids=[str(i)])
-    
-    return collection, lines
+def query_order(order_id):
+    if order_id in orders_db:
+        o = orders_db[order_id]
+        return f"订单{order_id}：{o['customer']}，{o['item']}，状态：{o['status']}，电话：{o['phone']}"
+    return f"未找到订单{order_id}"
 
-def encode_image(uploaded_file, max_size=1024):
-    img = Image.open(uploaded_file)
-    w, h = img.size
-    if max(w, h) > max_size:
-        ratio = max_size / max(w, h)
-        img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
-    buf = io.BytesIO()
-    img.convert("RGB").save(buf, format="JPEG", quality=85)
-    return base64.b64encode(buf.getvalue()).decode('utf-8')
+def refund_order(order_id):
+    if order_id in orders_db:
+        orders_db[order_id]["status"] = "已退款"
+        return f"订单{order_id}已退款成功，3个工作日内到账"
+    return f"退款失败，未找到订单{order_id}"
 
-def vision_chat(image_base64, question):
+def send_sms(phone, message):
+    return f"短信已发送到{phone}，内容：{message}"
+
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "query_order",
+            "description": "查询订单状态和详情",
+            "parameters": {
+                "type": "object",
+                "properties": {"order_id": {"type": "string", "description": "订单号"}},
+                "required": ["order_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "refund_order",
+            "description": "为订单办理退款",
+            "parameters": {
+                "type": "object",
+                "properties": {"order_id": {"type": "string", "description": "退款订单号"}},
+                "required": ["order_id"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_sms",
+            "description": "给顾客发送短信通知",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "phone": {"type": "string", "description": "手机号"},
+                    "message": {"type": "string", "description": "短信内容"}
+                },
+                "required": ["phone", "message"]
+            }
+        }
+    }
+]
+
+def execute_tool(tool_name, args):
+    if tool_name == "query_order":
+        return query_order(args["order_id"])
+    elif tool_name == "refund_order":
+        return refund_order(args["order_id"])
+    elif tool_name == "send_sms":
+        return send_sms(args["phone"], args["message"])
+    return "未知操作"
+
+def run_agent(user_message, history):
+    messages = [
+        {"role": "system", "content": "你是店铺操作助手。帮顾客查订单、退款、发短信。语气亲切。"}
+    ] + history + [
+        {"role": "user", "content": user_message}
+    ]
+    
     try:
         response = client.chat.completions.create(
             model=MODEL_NAME,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": question},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
-                    ]
-                }
-            ],
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
             temperature=0.7,
             max_tokens=500
         )
-        return response.choices[0].message.content
+        
+        msg = response.choices[0].message
+        
+        if msg.tool_calls:
+            tool_call = msg.tool_calls[0]
+            tool_name = tool_call.function.name
+            args = json.loads(tool_call.function.arguments)
+            
+            result = execute_tool(tool_name, args)
+            tool_log = {"tool": tool_name, "args": args, "result": result}
+            
+            messages.append(msg)
+            messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": result})
+            
+            final = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=500
+            )
+            
+            return final.choices[0].message.content, tool_log
+        else:
+            return msg.content, None
+    
     except Exception as e:
-        return f"❌ 识别失败：{str(e)}"
+        return f"❌ 操作失败：{str(e)}", None
 
-def rag_chat(question, collection):
-    results = collection.query(query_texts=[question], n_results=2)
-    docs = results['documents'][0]
-    knowledge = "\n".join(docs)
+if "agent_msgs" not in st.session_state:
+    st.session_state.agent_msgs = []
+if "agent_hist" not in st.session_state:
+    st.session_state.agent_hist = []
+
+st.title("🔧 店小秘AI · 智能操作")
+st.markdown("Agent模式，自动查订单、退款、发短信")
+
+with st.sidebar:
+    st.header("📋 功能说明")
+    st.markdown("""
+    - 📦 查询订单
+    - 💰 办理退款
+    - 📱 发送通知
     
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": f"你是店铺客服。根据以下知识回答，亲切简洁：\n{knowledge}"},
-                {"role": "user", "content": question}
-            ],
-            temperature=0.7,
-            max_tokens=300
-        )
-        return response.choices[0].message.content, docs
-    except Exception as e:
-        return f"❌ 问答失败：{str(e)}", docs
+    **示例：**
+    - "查订单001"
+    - "退款002"
+    - "通知13900001111外卖到了"
+    """)
+    if st.button("🔄 清空对话", use_container_width=True):
+        st.session_state.agent_msgs = []
+        st.session_state.agent_hist = []
+        st.rerun()
 
-if "collection" not in st.session_state:
-    st.session_state.collection, st.session_state.lines = init_knowledge()
+for msg in st.session_state.agent_msgs:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+        if msg.get("tool_log"):
+            with st.expander("🔧 操作详情"):
+                st.json(msg["tool_log"])
 
-st.title("🤖 店小秘AI · 全能助手")
-st.markdown("拍照问答 + 知识库客服，一个模型全搞定")
-
-tab1, tab2, tab3 = st.tabs(["📸 拍照问答", "💬 知识库客服", "📂 知识库管理"])
-
-with tab1:
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        question = st.text_input("你想问什么？", placeholder="例如：这道菜叫什么？怎么做的？")
-        uploaded = st.file_uploader("上传图片", type=["jpg","jpeg","png"])
-        if uploaded:
-            st.image(uploaded, use_container_width=True)
-        btn = st.button("🔍 看图回答", type="primary", use_container_width=True)
-    with col2:
-        if btn and uploaded and question:
-            with st.spinner("AI分析中..."):
-                answer = vision_chat(encode_image(uploaded), question)
-                if answer.startswith("❌"):
-                    st.error(answer)
-                else:
-                    st.markdown("**🤖 回答：**")
-                    st.success(answer)
-
-with tab2:
-    if "chat_msgs" not in st.session_state:
-        st.session_state.chat_msgs = []
+if user_input := st.chat_input("输入你的需求..."):
+    with st.chat_message("user"):
+        st.markdown(user_input)
     
-    for msg in st.session_state.chat_msgs:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    with st.spinner("处理中..."):
+        reply, tool_log = run_agent(user_input, st.session_state.agent_hist)
     
-    if user_input := st.chat_input("输入顾客问题..."):
-        with st.chat_message("user"):
-            st.markdown(user_input)
-        
-        with st.spinner("检索知识库..."):
-            reply, docs = rag_chat(user_input, st.session_state.collection)
-        
-        with st.chat_message("assistant"):
-            if reply.startswith("❌"):
-                st.error(reply)
-            else:
-                st.markdown(reply)
-                with st.expander("📚 参考知识"):
-                    for d in docs:
-                        st.text(f"• {d}")
-        
-        st.session_state.chat_msgs.append({"role":"user","content":user_input})
-        st.session_state.chat_msgs.append({"role":"assistant","content":reply})
-
-with tab3:
-    st.subheader("📂 上传知识文件")
-    uploaded_kb = st.file_uploader("选择txt文件", type="txt")
-    if uploaded_kb:
-        content = uploaded_kb.read().decode("utf-8")
-        st.session_state.collection, st.session_state.lines = init_knowledge(content)
-        st.success(f"知识库已更新，共 {len(st.session_state.lines)} 条")
-        with st.expander("预览"):
-            for i, line in enumerate(st.session_state.lines):
-                st.text(f"{i+1}. {line}")
+    with st.chat_message("assistant"):
+        if reply.startswith("❌"):
+            st.error(reply)
+        else:
+            st.markdown(reply)
+            if tool_log:
+                with st.expander("🔧 操作详情"):
+                    st.json(tool_log)
+    
+    st.session_state.agent_msgs.append({"role":"user","content":user_input})
+    st.session_state.agent_msgs.append({"role":"assistant","content":reply,"tool_log":tool_log})
+    st.session_state.agent_hist.append({"role":"user","content":user_input})
+    st.session_state.agent_hist.append({"role":"assistant","content":reply})
