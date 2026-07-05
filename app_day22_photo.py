@@ -8,17 +8,18 @@ import io
 st.set_page_config(page_title="拍照写文案", page_icon="📸", layout="wide")
 
 # ========== 读取密钥 ==========
-if "DEEPSEEK_API_KEY" not in st.secrets:
-    st.error("⚠️ 请在后台配置 DEEPSEEK_API_KEY")
+if "DOUBAO_API_KEY" not in st.secrets:
+    st.error("⚠️ 请在后台配置 DOUBAO_API_KEY")
     st.stop()
 
-API_KEY = st.secrets["DEEPSEEK_API_KEY"]
-# 正确接口地址：和纯文字模型共用同一个入口
-API_URL = "https://api.deepseek.com/v1/chat/completions"
+API_KEY = st.secrets["DOUBAO_API_KEY"]
+# 豆包官方接口地址，标准OpenAI兼容格式
+API_URL = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+# 多模态模型名
+MODEL_NAME = "doubao-vision-pro-32k"
 
 # ========== 图片自动压缩 ==========
 def encode_image(uploaded_file, max_size=1024):
-    """压缩图片+转base64，解决大图报错"""
     img = Image.open(uploaded_file)
     w, h = img.size
     if max(w, h) > max_size:
@@ -29,7 +30,7 @@ def encode_image(uploaded_file, max_size=1024):
     img.convert("RGB").save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode('utf-8')
 
-# ========== 正确调用 DeepSeek-VL2 ==========
+# ========== 调用多模态模型 ==========
 def photo_to_post(image_base64, style, shop_name):
     prompt = f"""你是餐饮营销专家。
 看到菜品照片后，请完成：
@@ -43,15 +44,16 @@ def photo_to_post(image_base64, style, shop_name):
 （文案内容）"""
 
     try:
-        # DeepSeek 官方标准多模态格式：image_url 和 content 平级
+        # 标准 OpenAI 多模态格式，通用写法
         payload = {
-            "model": "deepseek-vl2",
+            "model": MODEL_NAME,
             "messages": [
-                {"role": "system", "content": "你是专业的餐饮营销文案师。"},
                 {
                     "role": "user",
-                    "content": prompt,
-                    "image_url": f"data:image/jpeg;base64,{image_base64}"
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+                    ]
                 }
             ],
             "temperature": 0.7,
@@ -83,7 +85,7 @@ def parse_result(raw):
     return raw, ""
 
 # ==================== UI 界面 ====================
-st.title("📸 拍照写文案 · DeepSeek VL2")
+st.title("📸 拍照写文案 · 豆包视觉模型")
 st.markdown("拍菜品照片，AI自动识别并生成朋友圈文案")
 
 col1, col2 = st.columns([1, 1])
@@ -102,7 +104,7 @@ with col2:
     st.subheader("📝 生成结果")
     
     if btn and uploaded_file:
-        with st.spinner("VL2 识别并生成中..."):
+        with st.spinner("AI识别并生成中..."):
             img_b64 = encode_image(uploaded_file)
             raw = photo_to_post(img_b64, style, shop_name)
             desc, post = parse_result(raw)
