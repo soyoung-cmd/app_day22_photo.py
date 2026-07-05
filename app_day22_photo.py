@@ -7,18 +7,18 @@ import json
 
 st.set_page_config(page_title="微信风格客服", page_icon="💬", layout="wide")
 
-# ========== 模型配置（两个模型共用同一个密钥和地址）==========
+# ========== 模型配置 ==========
 client = OpenAI(
     api_key=st.secrets["DOUBAO_API_KEY"],
     base_url="https://ark.cn-beijing.volces.com/api/v3"
 )
 
-# 纯文字模型：负责对话、知识库、工具调用（换成你自己的DeepSeek-V4-flash接入点ID）
+# 纯文字模型：对话、知识库、工具调用（换成你自己的DeepSeek-V4-flash接入点ID）
 TEXT_MODEL = "ep-20260705195949-pr84t"
-# 视觉模型：负责图片识别、写文案（你现有的模型，不用改）
+# 视觉模型：图片识别、写文案（保持你原来的ID不变）
 VISION_MODEL = "ep-20260705180241-s57gl"
 
-# ==================== 店铺知识库（内置，不用向量库，避免启动超时）====================
+# ==================== 店铺知识库 ====================
 KB_DATA = [
     "营业时间：10:00-23:00",
     "预约电话：13812345678",
@@ -31,7 +31,6 @@ KB_DATA = [
 ]
 
 def search_kb(query, top_k=2):
-    """简单关键词检索，小知识库足够用，启动零延迟"""
     scores = []
     for item in KB_DATA:
         score = sum(1 for word in query if word in item)
@@ -97,7 +96,7 @@ def exec_tool(name, args):
 # ==================== 图片处理 ====================
 def encode_image(uploaded_file, max_size=1024):
     img = Image.open(uploaded_file)
-    w, h = img.size
+    w, h := img.size
     if max(w, h) > max_size:
         ratio = max_size / max(w, h)
         img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
@@ -126,9 +125,8 @@ def analyze_image(image_b64, prompt):
     except Exception as e:
         return f"图片识别失败：{str(e)}"
 
-# ==================== 核心对话函数（纯文字模型 + 工具调用）====================
+# ==================== 核心对话函数 ====================
 def chat_with_agent(user_text, history):
-    # 检索知识库
     kb_docs = search_kb(user_text)
     knowledge = "\n".join(kb_docs) if kb_docs else "无相关店铺信息"
 
@@ -145,7 +143,6 @@ def chat_with_agent(user_text, history):
     messages.append({"role": "user", "content": user_text})
 
     try:
-        # 第一次调用：判断是否调工具
         response = client.chat.completions.create(
             model=TEXT_MODEL,
             messages=messages,
@@ -158,7 +155,6 @@ def chat_with_agent(user_text, history):
 
         if msg.tool_calls:
             tool_call = msg.tool_calls[0]
-            # 解析参数，增加异常捕获
             try:
                 args = json.loads(tool_call.function.arguments)
             except:
@@ -166,7 +162,6 @@ def chat_with_agent(user_text, history):
             
             result = exec_tool(tool_call.function.name, args)
             
-            # 追加工具上下文
             messages.append(msg)
             messages.append({
                 "role": "tool",
@@ -174,7 +169,6 @@ def chat_with_agent(user_text, history):
                 "content": result
             })
 
-            # 第二次调用：生成最终回复
             final_resp = client.chat.completions.create(
                 model=TEXT_MODEL,
                 messages=messages,
@@ -183,10 +177,8 @@ def chat_with_agent(user_text, history):
             )
             
             final_content = final_resp.choices[0].message.content
-            # 返回回复 + 完整对话历史 + 工具日志
             return final_content, messages[1:], {"tool": tool_call.function.name, "result": result}
         
-        # 无工具调用，直接返回
         return msg.content, messages[1:], None
     
     except Exception as e:
@@ -194,13 +186,14 @@ def chat_with_agent(user_text, history):
 
 # ==================== 初始化状态 ====================
 if "chat_history" not in st.session_state:
-    # 统一维护一份对话历史，纯文本格式，传给模型用
     st.session_state.chat_history = []
 if "ui_messages" not in st.session_state:
-    # UI展示用的消息列表，带图片预览、工具日志
     st.session_state.ui_messages = [
         {"role": "assistant", "content": "亲，你好呀！👋\n我是店小秘，有什么可以帮你的吗？\n\n你可以问我：\n• 营业时间、菜单价格\n• 订单到哪里了\n• 发张照片我帮你写文案"}
     ]
+# 关键修复：记录上一次处理的文件名，避免重复处理上传的图片
+if "last_processed_img" not in st.session_state:
+    st.session_state.last_processed_img = None
 
 # ==================== 微信风格UI ====================
 st.markdown("""
@@ -215,7 +208,6 @@ chat_container = st.container()
 with chat_container:
     for msg in st.session_state.ui_messages:
         if msg["role"] == "user":
-            # 用户消息
             content_html = msg["content"]
             if msg.get("image"):
                 content_html = f'<img src="{msg["image"]}" style="max-width:200px; border-radius:8px;"/><br/>' + content_html
@@ -229,7 +221,6 @@ with chat_container:
             </div>
             """, unsafe_allow_html=True)
         else:
-            # AI消息
             content_display = msg["content"]
             if msg.get("tool_log"):
                 content_display += f"\n\n🔧 已执行：{msg['tool_log']['tool']}"
@@ -248,7 +239,7 @@ st.divider()
 col_img, col_input, col_clear = st.columns([1, 6, 1])
 
 with col_img:
-    upload_img = st.file_uploader("📷", type=["jpg","jpeg","png"], label_visibility="collapsed")
+    upload_img = st.file_uploader("📷", type=["jpg","jpeg","png"], label_visibility="collapsed", key="img_uploader")
 
 with col_input:
     user_input = st.chat_input("输入消息...", key="wx_input")
@@ -259,12 +250,12 @@ with col_clear:
         st.session_state.ui_messages = [
             {"role": "assistant", "content": "亲，你好呀！👋\n我是店小秘，有什么可以帮你的吗？"}
         ]
+        st.session_state.last_processed_img = None
         st.rerun()
 
 # ==================== 处理输入 ====================
 # 处理文字消息
 if user_input:
-    # 更新UI消息
     st.session_state.ui_messages.append({"role": "user", "content": user_input})
     
     with st.spinner(""):
@@ -273,51 +264,52 @@ if user_input:
             st.session_state.chat_history
         )
     
-    # 更新对话历史
     st.session_state.chat_history = new_history
     st.session_state.chat_history.append({"role": "user", "content": user_input})
     st.session_state.chat_history.append({"role": "assistant", "content": reply})
     
-    # 更新UI
     ai_msg = {"role": "assistant", "content": reply}
     if tool_log:
         ai_msg["tool_log"] = tool_log
     st.session_state.ui_messages.append(ai_msg)
     st.rerun()
 
-# 处理图片消息
+# 处理图片消息（核心修复：加重复判断）
 if upload_img:
-    img_b64 = encode_image(upload_img)
-    img_data_url = f"data:image/jpeg;base64,{img_b64}"
+    # 用文件名+大小作为唯一标识，同一个文件只处理一次
+    file_unique_id = f"{upload_img.name}_{upload_img.size}"
     
-    # UI追加带预览的用户消息
-    st.session_state.ui_messages.append({
-        "role": "user",
-        "content": "帮我看看这张图，写个朋友圈文案",
-        "image": img_data_url
-    })
-    
-    with st.spinner("正在识别图片..."):
-        # 第一步：视觉模型分析图片
-        image_result = analyze_image(
-            img_b64,
-            "识别这道菜品，描述菜品特点，然后写一条适合实体店发的朋友圈文案，40-80字，带emoji"
-        )
+    # 只有和上次处理的文件不一样，才执行处理
+    if file_unique_id != st.session_state.last_processed_img:
+        img_b64 = encode_image(upload_img)
+        img_data_url = f"data:image/jpeg;base64,{img_b64}"
         
-        # 第二步：把识别结果传给文字Agent，融入对话上下文
-        reply, new_history, tool_log = chat_with_agent(
-            f"用户发了一张菜品图片，识别结果如下：\n{image_result}\n请整理成友好的客服回复",
-            st.session_state.chat_history
-        )
-    
-    # 更新历史
-    st.session_state.chat_history = new_history
-    st.session_state.chat_history.append({"role": "user", "content": f"[图片] {image_result}"})
-    st.session_state.chat_history.append({"role": "assistant", "content": reply})
-    
-    # 更新UI
-    ai_msg = {"role": "assistant", "content": reply}
-    if tool_log:
-        ai_msg["tool_log"] = tool_log
-    st.session_state.ui_messages.append(ai_msg)
-    st.rerun()
+        st.session_state.ui_messages.append({
+            "role": "user",
+            "content": "帮我看看这张图，写个朋友圈文案",
+            "image": img_data_url
+        })
+        
+        with st.spinner("正在识别图片..."):
+            image_result = analyze_image(
+                img_b64,
+                "识别这道菜品，描述菜品特点，然后写一条适合实体店发的朋友圈文案，40-80字，带emoji"
+            )
+            
+            reply, new_history, tool_log = chat_with_agent(
+                f"用户发了一张菜品图片，识别结果如下：\n{image_result}\n请整理成友好的客服回复",
+                st.session_state.chat_history
+            )
+        
+        st.session_state.chat_history = new_history
+        st.session_state.chat_history.append({"role": "user", "content": f"[图片] {image_result}"})
+        st.session_state.chat_history.append({"role": "assistant", "content": reply})
+        
+        ai_msg = {"role": "assistant", "content": reply}
+        if tool_log:
+            ai_msg["tool_log"] = tool_log
+        st.session_state.ui_messages.append(ai_msg)
+        
+        # 标记这个文件已经处理过了
+        st.session_state.last_processed_img = file_unique_id
+        st.rerun()
