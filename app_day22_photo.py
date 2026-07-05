@@ -13,9 +13,9 @@ client = OpenAI(
     base_url="https://ark.cn-beijing.volces.com/api/v3"
 )
 
-# 纯文字模型：对话、知识库、工具调用（换成你自己的DeepSeek-V4-flash接入点ID）
-TEXT_MODEL = "ep-20260705195949-pr84t"
-# 视觉模型：图片识别、写文案（保持你原来的ID不变）
+# 纯文字模型：对话、知识库、工具调用（替换成你的DeepSeek-V4-flash接入点ID）
+TEXT_MODEL = "ep-你的纯文字模型接入点ID"
+# 视觉模型：图片识别、写文案（不变）
 VISION_MODEL = "ep-20260705180241-s57gl"
 
 # ==================== 店铺知识库 ====================
@@ -93,10 +93,10 @@ def exec_tool(name, args):
     except Exception as e:
         return f"工具执行失败：{str(e)}"
 
-# ==================== 图片处理 ====================
+# ==================== 图片处理（已修复语法错误） ====================
 def encode_image(uploaded_file, max_size=1024):
     img = Image.open(uploaded_file)
-    w, h := img.size
+    w, h = img.size
     if max(w, h) > max_size:
         ratio = max_size / max(w, h)
         img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
@@ -191,7 +191,7 @@ if "ui_messages" not in st.session_state:
     st.session_state.ui_messages = [
         {"role": "assistant", "content": "亲，你好呀！👋\n我是店小秘，有什么可以帮你的吗？\n\n你可以问我：\n• 营业时间、菜单价格\n• 订单到哪里了\n• 发张照片我帮你写文案"}
     ]
-# 关键修复：记录上一次处理的文件名，避免重复处理上传的图片
+# 防止上传图片无限循环重复处理
 if "last_processed_img" not in st.session_state:
     st.session_state.last_processed_img = None
 
@@ -274,12 +274,9 @@ if user_input:
     st.session_state.ui_messages.append(ai_msg)
     st.rerun()
 
-# 处理图片消息（核心修复：加重复判断）
+# 处理图片消息（防无限循环）
 if upload_img:
-    # 用文件名+大小作为唯一标识，同一个文件只处理一次
     file_unique_id = f"{upload_img.name}_{upload_img.size}"
-    
-    # 只有和上次处理的文件不一样，才执行处理
     if file_unique_id != st.session_state.last_processed_img:
         img_b64 = encode_image(upload_img)
         img_data_url = f"data:image/jpeg;base64,{img_b64}"
@@ -310,6 +307,5 @@ if upload_img:
             ai_msg["tool_log"] = tool_log
         st.session_state.ui_messages.append(ai_msg)
         
-        # 标记这个文件已经处理过了
         st.session_state.last_processed_img = file_unique_id
         st.rerun()
