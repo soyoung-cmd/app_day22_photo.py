@@ -13,11 +13,12 @@ if "DEEPSEEK_API_KEY" not in st.secrets:
     st.stop()
 
 API_KEY = st.secrets["DEEPSEEK_API_KEY"]
-# VL2 专用接口地址（注意：不是通用的 /v1/chat/completions）
-VL2_API_URL = "https://api.deepseek.com/vl2"
+# 正确接口地址：和纯文字模型共用同一个入口
+API_URL = "https://api.deepseek.com/v1/chat/completions"
 
-# ========== 图片自动压缩（解决大图报错）==========
+# ========== 图片自动压缩 ==========
 def encode_image(uploaded_file, max_size=1024):
+    """压缩图片+转base64，解决大图报错"""
     img = Image.open(uploaded_file)
     w, h = img.size
     if max(w, h) > max_size:
@@ -28,9 +29,8 @@ def encode_image(uploaded_file, max_size=1024):
     img.convert("RGB").save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode('utf-8')
 
-# ========== 调用 DeepSeek-VL2 专用接口 ==========
+# ========== 正确调用 DeepSeek-VL2 ==========
 def photo_to_post(image_base64, style, shop_name):
-    # 构造完整的提示词
     prompt = f"""你是餐饮营销专家。
 看到菜品照片后，请完成：
 1. 描述菜品：菜名、食材、颜色、口感（30字内）
@@ -43,11 +43,17 @@ def photo_to_post(image_base64, style, shop_name):
 （文案内容）"""
 
     try:
-        # 官方 VL2 专用请求格式
+        # DeepSeek 官方标准多模态格式：image_url 和 content 平级
         payload = {
             "model": "deepseek-vl2",
-            "text": prompt,
-            "image_url": f"data:image/jpeg;base64,{image_base64}",
+            "messages": [
+                {"role": "system", "content": "你是专业的餐饮营销文案师。"},
+                {
+                    "role": "user",
+                    "content": prompt,
+                    "image_url": f"data:image/jpeg;base64,{image_base64}"
+                }
+            ],
             "temperature": 0.7,
             "max_tokens": 500
         }
@@ -57,15 +63,15 @@ def photo_to_post(image_base64, style, shop_name):
             "Content-Type": "application/json"
         }
 
-        response = requests.post(VL2_API_URL, json=payload, headers=headers, timeout=30)
+        response = requests.post(API_URL, json=payload, headers=headers, timeout=30)
         response.raise_for_status()
         result = response.json()
         
-        # 提取返回结果
         return result["choices"][0]["message"]["content"]
     
     except Exception as e:
-        return f"❌ 生成失败\n错误原因：{str(e)}\n响应详情：{response.text if 'response' in dir() else '无'}"
+        detail = response.text if 'response' in dir() else "无响应详情"
+        return f"❌ 生成失败\n错误原因：{str(e)}\n响应详情：{detail}"
 
 # ========== 结果解析 ==========
 def parse_result(raw):
